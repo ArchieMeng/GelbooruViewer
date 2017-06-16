@@ -3,6 +3,23 @@ import requests
 
 
 class GelbooruPicture:
+    """
+    A gelbooru picture model
+    attribution includes:
+            max_id: int, 
+            width,
+            height,
+            score,
+            source,
+            preview_url,
+            sample_url,
+            file_url,
+            created_at,
+            creator_id,
+            tags: list,
+            picture_id,
+            rating: str
+    """
     def __init__(
             self,
             width,
