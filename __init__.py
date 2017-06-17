@@ -1,27 +1,9 @@
 from xml.etree import ElementTree
-from aiohttp import ClientSession
-import asyncio
+import requests
+from threading import Lock
 import logging
 
-
 class GelbooruPicture:
-    """
-    A gelbooru picture model
-    attribution includes:
-            max_id: int, 
-            width,
-            height,
-            score,
-            source,
-            preview_url,
-            sample_url,
-            file_url,
-            created_at,
-            creator_id,
-            tags: list,
-            picture_id,
-            rating: str
-    """
     def __init__(
             self,
             width,
@@ -78,26 +60,20 @@ class GelbooruPicture:
 
 class GelbooruViewer:
     API_URL = "https://gelbooru.com/index.php?page=dapi&s=post&q=index"
-    EXTRA_HEADERS = {
-        'Accept': 'application/json, application/xml',
-        'Accept-Language': 'en-US',
-        'User-Agent': 'Mozilla/5.0 GelbooruViewer/1.0 (+https://github.com/ArchieMeng/GelbooruViewer)'
-    }
     MAX_ID = 1
-    MAX_ID_LOCK = asyncio.Lock()
+    MAX_ID_LOCK = Lock()
 
     def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                'Accept': 'application/json, application/xml',
+                'Accept-Language': 'en-US',
+                'User-Agent': 'Mozilla/5.0 GelbooruViewer/1.0 (+https://github.com/ArchieMeng/GelbooruViewer)'
+            }
+        )
+        # get latest image to update MAX_ID
         self.get(limit=1)
-
-    async def async_get(self, url, params):
-        async with ClientSession() as session:
-            async with session.get(url, params=params, headers=GelbooruViewer.EXTRA_HEADERS) as response:
-                return await response.read()
-
-    async def async_set_max_id(self, max_id):
-        async with GelbooruViewer.MAX_ID_LOCK as lock:
-            if GelbooruViewer.MAX_ID < max_id:
-                GelbooruViewer.MAX_ID = max_id
 
     def get(self, **kwargs)->list:
         """
@@ -114,34 +90,36 @@ class GelbooruViewer:
         tags: The tags to search for. Any tag combination that works on the web site will work here.
         This includes all the meta-tags. See cheatsheet for more information.
 
-        id: The post id.
+        id
 
         :return: a list of type GelbooruPicture, if sth wrong happened, a empty list will be return
         """
         attempt = 0
         content = None
-        while attempt < 5:
+        while attempt < 3:
             attempt += 1
-            try:
-                loop = asyncio.get_event_loop()
-                content = loop.run_until_complete(self.async_get(GelbooruViewer.API_URL, kwargs))
-                break
-            except Exception as e:
-                logging.error(str(e))
-
+            with self.session as session:
+                with session.get(GelbooruViewer.API_URL, params=kwargs) as response:
+                    try:
+                        content = response.content
+                    except Exception as e:
+                        logging.error(str(e))
+                        pass
         if content is None:
             return []
+        if isinstance(content, bytes):
+            xml_str = content.decode('utf-8')
+        elif isinstance(content, str):
+            xml_str = content
 
-        xml_str = content.decode('utf-8')
         root = ElementTree.fromstring(xml_str)
         posts = root.findall('post')
         picture_list = []
-        print("GET {title} : {content}".format(title=root.tag, content=root.attrib))
 
         if posts:
             cur_max_id = int(posts[0].attrib['id'])
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(self.async_set_max_id(cur_max_id))
+            with GelbooruViewer.MAX_ID_LOCK:
+                GelbooruViewer.MAX_ID = max(GelbooruViewer.MAX_ID, cur_max_id)
 
         for post in posts:
             info = post.attrib
@@ -162,3 +140,6 @@ class GelbooruViewer:
                 )
             )
         return picture_list
+
+    def __del__(self):
+        self.session.close()
