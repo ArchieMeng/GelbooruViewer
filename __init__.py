@@ -1,5 +1,7 @@
 from xml.etree import ElementTree
-import requests
+from aiohttp import ClientSession
+import asyncio
+import logging
 
 
 class GelbooruPicture:
@@ -76,33 +78,61 @@ class GelbooruPicture:
 
 class GelbooruViewer:
     API_URL = "https://gelbooru.com/index.php?page=dapi&s=post&q=index"
+    EXTRA_HEADERS = {
+        'Accept': 'application/json, application/xml',
+        'Accept-Language': 'en-US',
+        'User-Agent': 'Mozilla/5.0 GelbooruViewer/1.0 (+https://github.com/ArchieMeng/GelbooruViewer)'
+    }
+    MAX_ID = 1
+    MAX_ID_LOCK = asyncio.Lock()
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                'Accept': 'application/json, application/xml',
-                'Accept-Language': 'en-US',
-                'User-Agent': 'Mozilla/5.0 GelbooruViewer/1.0 (+https://github.com/ArchieMeng/GelbooruViewer)'
-            }
-        )
-        self.max_id = 1
         self.get(limit=1)
+
+    async def async_get(self, url, params):
+        async with ClientSession() as session:
+            async with session.get(url, params=params, headers=GelbooruViewer.EXTRA_HEADERS) as response:
+                return await response.read()
+
+    async def async_set_max_id(self, max_id):
+        async with GelbooruViewer.MAX_ID_LOCK as lock:
+            if GelbooruViewer.MAX_ID < max_id:
+                GelbooruViewer.MAX_ID = max_id
 
     def get(self, **kwargs)->list:
         """
         use Gelbooru api to fetch picture info.
+
         :param kwargs: allowed args includes
-        limit -> How many posts you want to retrieve. There is a hard limit of 100 posts per request.
-        pid -> The page number.
-        tags -> The tags to search for. Any tag combination that works on the web site will work here. This includes all the meta-tags. See cheatsheet for more information.
-        cid -> Change ID of the post. This is in Unix time so there are likely others with the same value if updated at the same time.
-        id -> The post id.
+        limit: How many posts you want to retrieve. There is a hard limit of 100 posts per request.
+
+        pid: The page number.
+
+        cid: Change ID of the post.
+        This is in Unix time so there are likely others with the same value if updated at the same time.
+
+        tags: The tags to search for. Any tag combination that works on the web site will work here.
+        This includes all the meta-tags. See cheatsheet for more information.
+
+        id: The post id.
 
         :return: a list of type GelbooruPicture, if sth wrong happened, a empty list will be return
         """
-        response = self.session.get(GelbooruViewer.API_URL, params=kwargs)
-        xml_str = response.content.decode('utf-8')
+        attempt = 0
+        content = None
+        while attempt < 5:
+            attempt += 1
+            try:
+                loop = asyncio.get_event_loop()
+                content = loop.run_until_complete(self.async_get(GelbooruViewer.API_URL, kwargs))
+                break
+            except Exception as e:
+                logging.error(str(e))
+
+        if content is None:
+            return []
+
+        xml_str = content.decode('utf-8')
         root = ElementTree.fromstring(xml_str)
         posts = root.findall('post')
         picture_list = []
@@ -110,8 +140,8 @@ class GelbooruViewer:
 
         if posts:
             cur_max_id = int(posts[0].attrib['id'])
-            if cur_max_id > self.max_id:
-                self.max_id = cur_max_id
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(self.async_set_max_id(cur_max_id))
 
         for post in posts:
             info = post.attrib
@@ -132,6 +162,3 @@ class GelbooruViewer:
                 )
             )
         return picture_list
-
-    def __del__(self):
-        self.session.close()
