@@ -1,7 +1,9 @@
 from xml.etree import ElementTree
 import requests
-from threading import Lock
+from threading import Lock, Thread
 import logging
+from time import sleep
+
 
 class GelbooruPicture:
     def __init__(
@@ -73,7 +75,18 @@ class GelbooruViewer:
             }
         )
         # get latest image to update MAX_ID
-        self.get(limit=1)
+        self.get(limit=0)
+
+    def get_raw_content(self, **kwargs):
+        content = None
+        with self.session as session:
+            with session.get(GelbooruViewer.API_URL, params=kwargs) as response:
+                try:
+                    content = response.content
+                except Exception as e:
+                    logging.error(str(e))
+                    pass
+        return content
 
     def get(self, **kwargs)->list:
         """
@@ -96,20 +109,15 @@ class GelbooruViewer:
         """
         attempt = 0
         content = None
-        while attempt < 3:
+        while attempt < 3 and content is None:
             attempt += 1
-            with self.session as session:
-                with session.get(GelbooruViewer.API_URL, params=kwargs) as response:
-                    try:
-                        content = response.content
-                    except Exception as e:
-                        logging.error(str(e))
-                        pass
+            content = self.get_raw_content(**kwargs)
+
         if content is None:
             return []
         if isinstance(content, bytes):
             xml_str = content.decode('utf-8')
-        elif isinstance(content, str):
+        else:
             xml_str = content
 
         root = ElementTree.fromstring(xml_str)
@@ -140,6 +148,72 @@ class GelbooruViewer:
                 )
             )
         return picture_list
+
+    def get_all(self, tags: list, pid=0, num=None, thread_limit=5) -> list:
+        """
+        regardless of official request limit amount, use threading to request amount you want
+
+        :param thread_limit: amount of threads running at the same time
+
+        :param tags: tags must be provided
+
+        :param pid: beginning pid
+
+        :param num: num of picture you want
+
+        :return: list of GelbooruPicture
+
+        """
+        content = self.get_raw_content(tags=tags, limit=0)
+        xml_str = content.decode('utf-8')
+        root = ElementTree.fromstring(xml_str)
+        total = int(root.attrib['count'])
+        if isinstance(num, int):
+            if num > 0:
+                # if total amount is too large, use num instead.
+                total = min(total, num)
+        print(total)
+        picture_list = []
+
+        def _get(tags, pid):
+            content = self.get_raw_content(tags=tags, limit=100, pid=pid)
+            xml_string = content.decode()
+            posts = ElementTree.fromstring(xml_string).findall('post')
+            for post in posts:
+                info = post.attrib
+                picture_list.append(
+                    GelbooruPicture(
+                        info['width'],
+                        info['height'],
+                        info['score'],
+                        info['source'],
+                        "https:" + info['preview_url'],
+                        "https:" + info['sample_url'],
+                        "https:" + info['file_url'],
+                        info['created_at'],
+                        info['creator_id'],
+                        [tag for tag in info['tags'].split(' ') if tag and not tag.isspace()],
+                        info['id'],
+                        info['rating']
+                    )
+                )
+        if tags:
+            threads = []
+            for i in range(pid, int(total / 100) + 1):
+                if i and i % thread_limit == 0:
+                    # stop and wait threads to finish
+                    for thread in threads:
+                        thread.join()
+                    threads = []
+                thread = Thread(target=_get, args=[tags, i])
+                threads.append(thread)
+                thread.start()
+
+            for thread in threads:
+                thread.join()
+            return picture_list
+        else:
+            return []
 
     def __del__(self):
         self.session.close()
