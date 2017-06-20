@@ -3,6 +3,7 @@ import requests
 from threading import Lock, Thread
 import logging
 from time import sleep
+from lru import LRU
 
 
 class GelbooruPicture:
@@ -64,6 +65,7 @@ class GelbooruViewer:
     API_URL = "https://gelbooru.com/index.php?page=dapi&s=post&q=index"
     MAX_ID = 1
     MAX_ID_LOCK = Lock()
+    MAX_CACHE_SIZE = 512
 
     def __init__(self):
         self.session = requests.Session()
@@ -74,8 +76,39 @@ class GelbooruViewer:
                 'User-Agent': 'Mozilla/5.0 GelbooruViewer/1.0 (+https://github.com/ArchieMeng/GelbooruViewer)'
             }
         )
+        # only cache for get_all with tags while pid is 0!!!
+        self.cache = LRU(GelbooruViewer.MAX_CACHE_SIZE)
+        self.cache_lock = Lock()
+        # occasionally update cache
+        self.update_cache_thread = Thread(target=self._update_cache_loop)
+        self.update_cache_thread.daemon = True
+        self.update_cache_thread.start()
+
         # get latest image to update MAX_ID
         self.get(limit=0)
+
+    def _update_cache_loop(self):
+        minutes = 15
+        while True:
+            sleep(60 * minutes)
+            with self.cache_lock:
+                keys = self.cache.keys()
+            threads = []
+            count = 0
+            for key in keys:
+                if count and count % 4 == 0:
+                    for thread in threads:
+                        thread.join()
+                    threads = []
+                count += 1
+                thread = Thread(
+                    target=self.get_all,
+                    args=(key.split('+'), 0, 500, 5, False)
+                )
+                thread.start()
+                threads.append(thread)
+            for thread in threads:
+                thread.join()
 
     def get_raw_content(self, **kwargs):
         content = None
@@ -149,9 +182,11 @@ class GelbooruViewer:
             )
         return picture_list
 
-    def get_all(self, tags: list, pid=0, num=None, thread_limit=5) -> list:
+    def get_all(self, tags: list, pid=0, num=None, thread_limit=5, use_cache=True) -> list:
         """
         regardless of official request limit amount, use threading to request amount you want
+
+        :param use_cache: whether prefer internal cache
 
         :param thread_limit: amount of threads running at the same time
 
@@ -159,11 +194,22 @@ class GelbooruViewer:
 
         :param pid: beginning pid
 
-        :param num: num of picture you want
+        :param num: num of picture you want.
+        This function might return less pictures if Gelbooru hasn't got enough picture
 
         :return: list of GelbooruPicture
 
         """
+        tags.sort()
+        if use_cache and pid == 0:
+            with self.cache_lock:
+                key = '+'.join(tags)
+                if key in self.cache:
+                    if not num:
+                        return self.cache[key]
+                    else:
+                        return self.cache[key][:num]
+
         content = self.get_raw_content(tags=tags, limit=0)
         xml_str = content.decode('utf-8')
         root = ElementTree.fromstring(xml_str)
@@ -172,7 +218,6 @@ class GelbooruViewer:
             if num > 0:
                 # if total amount is too large, use num instead.
                 total = min(total, num)
-        print(total)
         picture_list = []
 
         def _get(tags, pid):
@@ -211,6 +256,11 @@ class GelbooruViewer:
 
             for thread in threads:
                 thread.join()
+
+            if pid == 0:
+                with self.cache_lock:
+                    key = '+'.join(tags)
+                    self.cache[key] = picture_list
             return picture_list
         else:
             return []
