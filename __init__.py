@@ -1,8 +1,8 @@
 from xml.etree import ElementTree
 import requests
-from threading import Lock, Thread, Semaphore
+from threading import Lock, Thread
 import logging
-from time import sleep
+from time import time, sleep
 from lru import LRU
 
 
@@ -65,8 +65,8 @@ class GelbooruViewer:
     API_URL = "https://gelbooru.com/index.php?page=dapi&s=post&q=index"
     MAX_ID = 1
     MAX_ID_LOCK = Lock()
-    MAX_THREAD_NUM = 10
-    MAX_CACHE_SIZE = 512
+    MAX_CACHE_SIZE = 64
+    MAX_CACHE_TIME = 60  # minutes
 
     def __init__(self):
         self.session = requests.Session()
@@ -80,23 +80,35 @@ class GelbooruViewer:
         # only cache for get_all with tags while pid is 0!!!
         self.cache = LRU(GelbooruViewer.MAX_CACHE_SIZE)
         self.cache_lock = Lock()
-        self.thread_semaphore = Semaphore(value=GelbooruViewer.MAX_THREAD_NUM)
         # occasionally update cache
-        self.update_cache_thread = Thread(target=self._update_cache_loop)
-        self.update_cache_thread.daemon = True
+        self.last_cache_used = time()
+        self.update_cache_thread = Thread(target=self._update_cache_loop, daemon=True)
         self.update_cache_thread.start()
 
         # get latest image to update MAX_ID
         self.get(limit=0)
 
     def _update_cache_loop(self):
-        minutes = 15
+        """
+        Occasionally refresh cache. Clear cache if unused for a long time.
+        :return:
+        """
+        minutes = 30
         while True:
             sleep(60 * minutes)
+            if time() - self.last_cache_used > self.MAX_CACHE_TIME * 60:
+                self.cache.clear()
+                continue
             with self.cache_lock:
                 keys = self.cache.keys()
             threads = []
+            count = 0
             for key in keys:
+                if count and count % 4 == 0:
+                    for thread in threads:
+                        thread.join()
+                    threads = []
+                count += 1
                 thread = Thread(
                     target=self.get_all,
                     args=(key.split('+'), 0, 500, 5, False)
@@ -108,13 +120,13 @@ class GelbooruViewer:
 
     def get_raw_content(self, **kwargs):
         content = None
-        with self.thread_semaphore:
-            response = self.session.get(GelbooruViewer.API_URL, params=kwargs)
-            try:
-                content = response.content
-            except Exception as e:
-                logging.error(str(e))
-                pass
+        with self.session as session:
+            with session.get(GelbooruViewer.API_URL, params=kwargs) as response:
+                try:
+                    content = response.content
+                except Exception as e:
+                    logging.error(str(e))
+                    pass
         return content
 
     def get(self, **kwargs)->list:
@@ -131,8 +143,6 @@ class GelbooruViewer:
 
         tags: The tags to search for. Any tag combination that works on the web site will work here.
         This includes all the meta-tags. See cheatsheet for more information.
-
-        id
 
         :return: a list of type GelbooruPicture, if sth wrong happened, a empty list will be return
         """
@@ -201,6 +211,7 @@ class GelbooruViewer:
             with self.cache_lock:
                 key = '+'.join(tags)
                 if key in self.cache:
+                    self.last_cache_used = time()
                     if not num:
                         return self.cache[key]
                     else:
@@ -241,6 +252,11 @@ class GelbooruViewer:
         if tags:
             threads = []
             for i in range(pid, int(total / 100) + 1):
+                if i and i % thread_limit == 0:
+                    # stop and wait threads to finish
+                    for thread in threads:
+                        thread.join()
+                    threads = []
                 thread = Thread(target=_get, args=[tags, i])
                 threads.append(thread)
                 thread.start()
@@ -250,6 +266,7 @@ class GelbooruViewer:
 
             if pid == 0:
                 with self.cache_lock:
+                    self.last_cache_used = time()
                     key = '+'.join(tags)
                     self.cache[key] = picture_list
             return picture_list
