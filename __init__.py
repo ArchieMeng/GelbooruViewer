@@ -3,7 +3,9 @@ import requests
 from threading import Lock, Thread
 import logging
 from time import time, sleep
+import gc
 from lru import LRU
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class GelbooruPicture:
@@ -88,6 +90,13 @@ class GelbooruViewer:
         # get latest image to update MAX_ID
         self.get(limit=0)
 
+    def _update_cache(self, tags, num=None):
+        result = [*self.get_all_generator(tags, 0, num, 5)]
+        if result:
+            key = '+'.join(tags)
+            with self.cache_lock:
+                self.cache[key] = result
+
     def _update_cache_loop(self):
         """
         Occasionally refresh cache. Clear cache if unused for a long time.
@@ -98,25 +107,18 @@ class GelbooruViewer:
             sleep(60 * minutes)
             if time() - self.last_cache_used > self.MAX_CACHE_TIME * 60:
                 self.cache.clear()
+                gc.collect()
                 continue
             with self.cache_lock:
                 keys = self.cache.keys()
-            threads = []
-            count = 0
-            for key in keys:
-                if count and count % 4 == 0:
-                    for thread in threads:
-                        thread.join()
-                    threads = []
-                count += 1
-                thread = Thread(
-                    target=self.get_all,
-                    args=(key.split('+'), 0, 500, 5, False)
-                )
-                thread.start()
-                threads.append(thread)
-            for thread in threads:
-                thread.join()
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = [ executor.submit(self._update_cache, key.split('+'), 0, 500) for key in keys]
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                        print(result)
+                    except Exception as e:
+                        print("Exception happened in GelbooruViewer._update_cache_loop", type(e), e)
 
     def get_raw_content(self, **kwargs):
         content = None
@@ -188,9 +190,15 @@ class GelbooruViewer:
             )
         return picture_list
 
-    def get_all(self, tags: list, pid=0, num=None, thread_limit=5, use_cache=True) -> list:
+    def get_all(self, tags: list, pid=0, num=None, thread_limit=5, use_cache=True):
         """
         regardless of official request limit amount, use threading to request amount you want
+
+        When pictures is found in cache, list is returned.
+
+        When pictures is found, generator is returned.
+
+        Else, None is returned
 
         :param use_cache: whether prefer internal cache
 
@@ -198,80 +206,100 @@ class GelbooruViewer:
 
         :param tags: tags must be provided
 
-        :param pid: beginning pid
+        :param pid: beginning page id , index from 0
 
         :param num: num of picture you want.
-        This function might return less pictures if Gelbooru hasn't got enough picture
+        This function might return less pictures than u want only if Gelbooru hasn't got enough picture
 
-        :return: list of GelbooruPicture
+        :return: a generator of gelboorupicture or list or None
 
         """
         tags.sort()
         if use_cache and pid == 0:
+            self.last_cache_used = time()
             with self.cache_lock:
                 key = '+'.join(tags)
-                if key in self.cache:
-                    self.last_cache_used = time()
+                if key in self.cache and isinstance(self.cache[key], list):
                     if not num:
                         return self.cache[key]
                     else:
                         return self.cache[key][:num]
+                elif key not in self.cache or isinstance(self.cache[key], str):
+                    # only one thread is executed during update. When update executed, a str is put into cache
+                    self.cache[key] = "executing"
+                    # currently cache size is limited in cate of Memory leak.
+                    thread = Thread(target=self._update_cache, args=(tags, 1000), daemon=True)
+                    thread.start()
 
         content = self.get_raw_content(tags=tags, limit=0)
         xml_str = content.decode('utf-8')
         root = ElementTree.fromstring(xml_str)
         total = int(root.attrib['count'])
+        if total > 0:
+            return self.get_all_generator(tags, pid, num, thread_limit, total)
+        else:
+            return None
+
+    def get_all_generator(self, tags: list, pid=0, num=None, thread_limit=5, total=None, limit=25):
+        """
+        True function of get all. Generator is returned
+        :param tags: tags of pictures
+
+        :param pid: beginning page id , index from 0
+
+        :param num: num of picture you want.num of picture you want.
+        This function might return less pictures than u want only if Gelbooru hasn't got enough picture
+
+        :param total: total amount of picture, just set None if u don't know it. This is used by internal function
+        :param limit: picture number per request.
+        Generally, limit=10 cost 1.2s per request, while 25 cost 1.4s, 50 cost 2.2s, 100 cost 2.6s.
+        The Larger limit , the faster speed in per request, but larger in total get_all timing.
+
+        :return:
+        """
+        if limit < 0 or limit > 100:
+            limit = 10
+
+        def _get(tags, pid):
+            content = self.get_raw_content(tags=tags, limit=limit, pid=pid)
+            xml_string = content.decode()
+            posts = ElementTree.fromstring(xml_string).findall('post')
+            return posts
+        if total is None:
+            content = self.get_raw_content(tags=tags, limit=0)
+            xml_str = content.decode('utf-8')
+            root = ElementTree.fromstring(xml_str)
+            total = int(root.attrib['count'])
         if isinstance(num, int):
             if num > 0:
                 # if total amount is too large, use num instead.
                 total = min(total, num)
-        picture_list = []
-
-        def _get(tags, pid):
-            content = self.get_raw_content(tags=tags, limit=100, pid=pid)
-            xml_string = content.decode()
-            posts = ElementTree.fromstring(xml_string).findall('post')
-            for post in posts:
-                info = post.attrib
-                picture_list.append(
-                    GelbooruPicture(
-                        info['width'],
-                        info['height'],
-                        info['score'],
-                        info['source'],
-                        "https:" + info['preview_url'],
-                        "https:" + info['sample_url'],
-                        "https:" + info['file_url'],
-                        info['created_at'],
-                        info['creator_id'],
-                        [tag for tag in info['tags'].split(' ') if tag and not tag.isspace()],
-                        info['id'],
-                        info['rating']
-                    )
-                )
-        if tags:
-            threads = []
-            for i in range(pid, int(total / 100) + 1):
-                if i and i % thread_limit == 0:
-                    # stop and wait threads to finish
-                    for thread in threads:
-                        thread.join()
-                    threads = []
-                thread = Thread(target=_get, args=[tags, i])
-                threads.append(thread)
-                thread.start()
-
-            for thread in threads:
-                thread.join()
-
-            if pid == 0:
-                with self.cache_lock:
-                    self.last_cache_used = time()
-                    key = '+'.join(tags)
-                    self.cache[key] = picture_list
-            return picture_list
-        else:
-            return []
-
-    def __del__(self):
-        self.session.close()
+        if tags and total > 0:
+            with ThreadPoolExecutor(max_workers=thread_limit) as executor:
+                tasks = range(pid, int(total / limit) + 1)
+                while tasks:
+                    futures2idx = {executor.submit(_get, tags, i): i for i in tasks}
+                    tasks = []
+                    for future in as_completed(futures2idx):
+                        idx = futures2idx[future]
+                        try:
+                            posts = future.result()
+                            for post in posts:
+                                info = post.attrib
+                                yield GelbooruPicture(
+                                    info['width'],
+                                    info['height'],
+                                    info['score'],
+                                    info['source'],
+                                    "https:" + info['preview_url'],
+                                    "https:" + info['sample_url'],
+                                    "https:" + info['file_url'],
+                                    info['created_at'],
+                                    info['creator_id'],
+                                    [tag for tag in info['tags'].split(' ') if tag and not tag.isspace()],
+                                    info['id'],
+                                    info['rating']
+                                )
+                        except Exception as e:
+                            print("GelbooruViewer.get_all_generators raise", type(e), e)
+                            tasks.append(idx)

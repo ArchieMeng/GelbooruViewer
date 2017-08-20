@@ -4,16 +4,23 @@ from pickle import dump
 
 if __name__ == "__main__":
     viewer = GelbooruViewer()
-    tags = ['weiss']
+    tags = ['1da']
+    limit = 50
     t1 = time()
-    pictures = viewer.get_all(tags=tags, num=500)
-    print(len(pictures), pictures)
-    t2 = time()
-    pictures = viewer.get_all(tags=tags, num=500)
-    print(len(pictures), pictures)
-    t3 = time()
-    print(len(pictures), "times: 1:{}s 2:{}s".format(t2-t1, t3-t2))
-    sleep(60)
-    print(viewer.get_all(tags=tags))
-    with open('-'.join(tags) + '.pickle', 'wb') as wf:
-        dump(pictures, wf, protocol=2)
+    pictures = viewer.get_all_generator(tags, num=500)
+    print(pictures)
+    if pictures:
+        for i, picture in enumerate(pictures):
+            if i == 10:
+                print("get result and stop")
+                break
+        t2 = time()
+        print(t2 - t1, "s")
+        # sleep(15)
+        t3 = time()
+        pictures = viewer.get_all_generator(tags, num=500)
+        print(len([*pictures]))
+        t4 = time()
+        print("times: 1:{}s 2:{}s".format(t2-t1, t4-t3))
+    else:
+        print("tag:", tags, "not found")
