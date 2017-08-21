@@ -91,7 +91,7 @@ class GelbooruViewer:
         self.get(limit=0)
 
     def _update_cache(self, tags, num=None):
-        result = [*self.get_all_generator(tags, 0, num, 5)]
+        result = [*self.get_all_generator(tags, 0, num, 5, limit=100)]
         if result:
             key = '+'.join(tags)
             with self.cache_lock:
@@ -190,7 +190,7 @@ class GelbooruViewer:
             )
         return picture_list
 
-    def get_all(self, tags: list, pid=0, num=None, thread_limit=5, use_cache=True):
+    def get_all(self, tags: list, pid=0, num=None, thread_limit=5, use_cache=True, limit=25):
         """
         regardless of official request limit amount, use threading to request amount you want
 
@@ -236,13 +236,22 @@ class GelbooruViewer:
         root = ElementTree.fromstring(xml_str)
         total = int(root.attrib['count'])
         if total > 0:
-            return self.get_all_generator(tags, pid, num, thread_limit, total)
+            return self.get_all_generator(tags, pid, num, thread_limit, total, limit)
         else:
             return None
 
-    def get_all_generator(self, tags: list, pid=0, num=None, thread_limit=5, total=None, limit=25):
+    def get_all_generator(
+            self,
+            tags: list,
+            pid=0,
+            num=None,
+            thread_limit=5,
+            total=None,
+            limit=25
+    ):
         """
         True function of get all. Generator is returned
+        :param thread_limit: max threads to fetch pictures at one time
         :param tags: tags of pictures
 
         :param pid: beginning page id , index from 0
