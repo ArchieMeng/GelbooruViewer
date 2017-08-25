@@ -91,11 +91,18 @@ class GelbooruViewer:
         self.get(limit=0)
 
     def _update_cache(self, tags, num=None):
-        result = [*self.get_all_generator(tags, 0, num, 5, limit=100)]
-        if result:
-            key = '+'.join(tags)
-            with self.cache_lock:
-                self.cache[key] = result
+        """
+        Do the update cache task
+        :param tags: tags of picture to update to cache
+        :param num:  amount of pictures
+        :return:
+        """
+        if tags:
+            result = [*self.get_all_generator(tags, 0, num, thread_limit=1, limit=100)]
+            if result:
+                key = '+'.join(tags)
+                with self.cache_lock:
+                    self.cache[key] = result
 
     def _update_cache_loop(self):
         """
@@ -111,8 +118,8 @@ class GelbooruViewer:
                 continue
             with self.cache_lock:
                 keys = self.cache.keys()
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                futures = [ executor.submit(self._update_cache, key.split('+'), 0, 500) for key in keys]
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(self._update_cache, key.split('+'), 0, 1000) for key in keys]
                 for future in as_completed(futures):
                     try:
                         result = future.result()
@@ -196,9 +203,11 @@ class GelbooruViewer:
 
         When pictures is found in cache, list is returned.
 
-        When pictures is found, generator is returned.
+        When pictures is found but not in cache, generator is returned.
 
         Else, None is returned
+
+        :param limit: number of pictures in per request
 
         :param use_cache: whether prefer internal cache
 
@@ -216,15 +225,16 @@ class GelbooruViewer:
         """
         tags.sort()
         if use_cache and pid == 0:
-            self.last_cache_used = time()
             with self.cache_lock:
                 key = '+'.join(tags)
                 if key in self.cache and isinstance(self.cache[key], list):
+                    self.last_cache_used = time()
                     if not num:
                         return self.cache[key]
                     else:
                         return self.cache[key][:num]
                 elif key not in self.cache or isinstance(self.cache[key], str):
+                    self.last_cache_used = time()
                     # only one thread is executed during update. When update executed, a str is put into cache
                     self.cache[key] = "executing"
                     # currently cache size is limited in cate of Memory leak.
@@ -285,9 +295,14 @@ class GelbooruViewer:
                 total = min(total, num)
         if tags and total > 0:
             with ThreadPoolExecutor(max_workers=thread_limit) as executor:
-                tasks = range(pid, int(total / limit) + 1)
-                while tasks:
-                    futures2idx = {executor.submit(_get, tags, i): i for i in tasks}
+                final_pid = int(total / limit)
+                start = pid
+                tasks = []
+                while start < final_pid:
+                    futures2idx = {
+                        executor.submit(_get, tags, i): i
+                        for i in tasks + [j for j in range(start, min(start + thread_limit, final_pid))]
+                    }
                     tasks = []
                     for future in as_completed(futures2idx):
                         idx = futures2idx[future]
@@ -312,3 +327,4 @@ class GelbooruViewer:
                         except Exception as e:
                             print("GelbooruViewer.get_all_generators raise", type(e), e)
                             tasks.append(idx)
+                        start += thread_limit
