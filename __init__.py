@@ -130,12 +130,12 @@ class GelbooruViewer:
     def get_raw_content(self, **kwargs):
         content = None
         with self.session as session:
-            with session.get(GelbooruViewer.API_URL, params=kwargs) as response:
-                try:
-                    content = response.content
-                except Exception as e:
-                    logging.error(str(e))
-                    pass
+            response = session.get(GelbooruViewer.API_URL, params=kwargs)
+            try:
+                content = response.content
+            except Exception as e:
+                logging.error(str(e))
+                pass
         return content
 
     def get(self, **kwargs)->list:
