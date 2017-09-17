@@ -67,7 +67,7 @@ class GelbooruViewer:
     API_URL = "https://gelbooru.com/index.php?page=dapi&s=post&q=index"
     MAX_ID = 1
     MAX_ID_LOCK = Lock()
-    MAX_CACHE_SIZE = 64
+    MAX_CACHE_SIZE = 32
     MAX_CACHE_TIME = 60  # minutes
 
     def __init__(self):
@@ -80,6 +80,7 @@ class GelbooruViewer:
             }
         )
         # only cache for get_all with tags while pid is 0!!!
+
         self.cache = LRU(GelbooruViewer.MAX_CACHE_SIZE)
         self.cache_lock = Lock()
         # occasionally update cache
@@ -298,10 +299,10 @@ class GelbooruViewer:
                 final_pid = int(total / limit)
                 start = pid
                 tasks = []
-                while start < final_pid:
+                while start < final_pid + 1:
                     futures2idx = {
                         executor.submit(_get, tags, i): i
-                        for i in tasks + [j for j in range(start, min(start + thread_limit, final_pid))]
+                        for i in tasks + [j for j in range(start, min(start + thread_limit, final_pid + 1))]
                     }
                     tasks = []
                     for future in as_completed(futures2idx):
