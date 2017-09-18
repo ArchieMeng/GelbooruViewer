@@ -280,11 +280,6 @@ class GelbooruViewer:
         if limit < 0 or limit > 100:
             limit = 10
 
-        def _get(tags, pid):
-            content = self.get_raw_content(tags=tags, limit=limit, pid=pid)
-            xml_string = content.decode()
-            posts = ElementTree.fromstring(xml_string).findall('post')
-            return posts
         if total is None:
             content = self.get_raw_content(tags=tags, limit=0)
             xml_str = content.decode('utf-8')
@@ -301,30 +296,23 @@ class GelbooruViewer:
                 tasks = []
                 while start < final_pid + 1:
                     futures2idx = {
-                        executor.submit(_get, tags, i): i
+                        executor.submit(
+                            self.get,
+                            {
+                                'tags': tags,
+                                'limit': limit,
+                                'pid': i
+                            }
+                    ): i
                         for i in tasks + [j for j in range(start, min(start + thread_limit, final_pid + 1))]
                     }
                     tasks = []
                     for future in as_completed(futures2idx):
                         idx = futures2idx[future]
                         try:
-                            posts = future.result()
-                            for post in posts:
-                                info = post.attrib
-                                yield GelbooruPicture(
-                                    info['width'],
-                                    info['height'],
-                                    info['score'],
-                                    info['source'],
-                                    "https:" + info['preview_url'],
-                                    "https:" + info['sample_url'],
-                                    "https:" + info['file_url'],
-                                    info['created_at'],
-                                    info['creator_id'],
-                                    [tag for tag in info['tags'].split(' ') if tag and not tag.isspace()],
-                                    info['id'],
-                                    info['rating']
-                                )
+                            pictures = future.result()
+                            for picture in pictures:
+                                yield picture
                         except Exception as e:
                             print("GelbooruViewer.get_all_generators raise", type(e), e)
                             tasks.append(idx)
