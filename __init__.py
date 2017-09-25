@@ -4,9 +4,8 @@ from threading import Lock, Thread
 import logging
 from time import time, sleep
 import gc
-from lru import LRU
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+import importlib
 
 class GelbooruPicture:
     def __init__(
@@ -80,8 +79,11 @@ class GelbooruViewer:
             }
         )
         # only cache for get_all with tags while pid is 0!!!
-
-        self.cache = LRU(GelbooruViewer.MAX_CACHE_SIZE)
+        if importlib.find_loader('lru'):
+            from lru import LRU
+            self.cache = LRU(GelbooruViewer.MAX_CACHE_SIZE)
+        else:
+            self.cache = dict()
         self.cache_lock = Lock()
         # occasionally update cache
         self.last_cache_used = time()
