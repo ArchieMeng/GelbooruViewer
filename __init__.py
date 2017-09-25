@@ -300,11 +300,9 @@ class GelbooruViewer:
                     futures2idx = {
                         executor.submit(
                             self.get,
-                            {
-                                'tags': tags,
-                                'limit': limit,
-                                'pid': i
-                            }
+                            tags=tags,
+                            limit=limit,
+                            pid=i
                     ): i
                         for i in tasks + [j for j in range(start, min(start + thread_limit, final_pid + 1))]
                     }
