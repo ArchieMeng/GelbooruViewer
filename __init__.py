@@ -4,8 +4,9 @@ from threading import Lock, Thread
 import logging
 from time import time, sleep
 import gc
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import importlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 class GelbooruPicture:
     def __init__(
@@ -67,7 +68,8 @@ class GelbooruViewer:
     MAX_ID = 1
     MAX_ID_LOCK = Lock()
     MAX_CACHE_SIZE = 32
-    MAX_CACHE_TIME = 60  # minutes
+    MAX_CACHE_TIME = 24 * 60  # minutes
+    PICTURES_PER_TAG = 200
 
     def __init__(self):
         self.session = requests.Session()
@@ -79,11 +81,13 @@ class GelbooruViewer:
             }
         )
         # only cache for get_all with tags while pid is 0!!!
+
         if importlib.find_loader('lru'):
             from lru import LRU
             self.cache = LRU(GelbooruViewer.MAX_CACHE_SIZE)
         else:
             self.cache = dict()
+
         self.cache_lock = Lock()
         # occasionally update cache
         self.last_cache_used = time()
@@ -112,7 +116,7 @@ class GelbooruViewer:
         Occasionally refresh cache. Clear cache if unused for a long time.
         :return:
         """
-        minutes = 30
+        minutes = 2 * 60
         while True:
             sleep(60 * minutes)
             if time() - self.last_cache_used > self.MAX_CACHE_TIME * 60:
@@ -122,7 +126,7 @@ class GelbooruViewer:
             with self.cache_lock:
                 keys = self.cache.keys()
             with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = [executor.submit(self._update_cache, key.split('+'), 0, 1000) for key in keys]
+                futures = [executor.submit(self._update_cache, key.split('+'), GelbooruViewer.PICTURES_PER_TAG) for key in keys]
                 for future in as_completed(futures):
                     try:
                         result = future.result()
@@ -179,6 +183,8 @@ class GelbooruViewer:
             cur_max_id = int(posts[0].attrib['id'])
             with GelbooruViewer.MAX_ID_LOCK:
                 GelbooruViewer.MAX_ID = max(GelbooruViewer.MAX_ID, cur_max_id)
+        else:
+            return None
 
         for post in posts:
             info = post.attrib
@@ -241,13 +247,20 @@ class GelbooruViewer:
                     # only one thread is executed during update. When update executed, a str is put into cache
                     self.cache[key] = "executing"
                     # currently cache size is limited in cate of Memory leak.
-                    thread = Thread(target=self._update_cache, args=(tags, 1000), daemon=True)
+                    thread = Thread(
+                        target=self._update_cache,
+                        args=(tags, GelbooruViewer.PICTURES_PER_TAG),
+                        daemon=True
+                    )
                     thread.start()
 
         content = self.get_raw_content(tags=tags, limit=0)
         xml_str = content.decode('utf-8')
         root = ElementTree.fromstring(xml_str)
-        total = int(root.attrib['count'])
+        try:
+            total = int(root.attrib['count'])
+        except:
+            return None
         if total > 0:
             return self.get_all_generator(tags, pid, num, thread_limit, total, limit)
         else:
@@ -282,6 +295,11 @@ class GelbooruViewer:
         if limit < 0 or limit > 100:
             limit = 10
 
+        def _get(tags, pid):
+            content = self.get_raw_content(tags=tags, limit=limit, pid=pid)
+            xml_string = content.decode()
+            posts = ElementTree.fromstring(xml_string).findall('post')
+            return posts
         if total is None:
             content = self.get_raw_content(tags=tags, limit=0)
             xml_str = content.decode('utf-8')
@@ -298,21 +316,30 @@ class GelbooruViewer:
                 tasks = []
                 while start < final_pid + 1:
                     futures2idx = {
-                        executor.submit(
-                            self.get,
-                            tags=tags,
-                            limit=limit,
-                            pid=i
-                    ): i
+                        executor.submit(_get, tags, i): i
                         for i in tasks + [j for j in range(start, min(start + thread_limit, final_pid + 1))]
                     }
                     tasks = []
                     for future in as_completed(futures2idx):
                         idx = futures2idx[future]
                         try:
-                            pictures = future.result()
-                            for picture in pictures:
-                                yield picture
+                            posts = future.result()
+                            for post in posts:
+                                info = post.attrib
+                                yield GelbooruPicture(
+                                    info['width'],
+                                    info['height'],
+                                    info['score'],
+                                    info['source'],
+                                    "https:" + info['preview_url'],
+                                    "https:" + info['sample_url'],
+                                    "https:" + info['file_url'],
+                                    info['created_at'],
+                                    info['creator_id'],
+                                    [tag for tag in info['tags'].split(' ') if tag and not tag.isspace()],
+                                    info['id'],
+                                    info['rating']
+                                )
                         except Exception as e:
                             print("GelbooruViewer.get_all_generators raise", type(e), e)
                             tasks.append(idx)
